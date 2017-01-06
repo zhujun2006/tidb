@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"math/rand"
 	"os"
 	"path"
@@ -24,7 +25,9 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/ngaut/log"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/filesort"
 	"github.com/pingcap/tidb/util/types"
 )
 
@@ -318,6 +321,7 @@ func main() {
 		cLog("Done!")
 		cLogf("Data placed in: %s", path.Join(tmpDir, "data.out"))
 		cLog("Time used: ", time.Since(start))
+		cLog("=================================")
 	}
 
 	if runCmd.Parsed() {
@@ -340,7 +344,9 @@ func main() {
 
 		var (
 			err  error
+			dir  string
 			data []*comparableRow
+			fs   *filesort.FileSorter
 		)
 		cLog("Loading...")
 		start := time.Now()
@@ -349,8 +355,61 @@ func main() {
 			log.Fatal(err)
 		}
 		cLog("Done!")
+		cLogf("Loaded %d rows", len(data))
 		cLog("Time used: ", time.Since(start))
-		cLogf("data size: %d", len(data))
+		cLog("=================================")
+
+		sc := new(variable.StatementContext)
+		fsBuilder := new(filesort.Builder)
+		byDesc := make([]bool, keySize)
+		for i := 0; i < keySize; i++ {
+			byDesc[i] = false
+		}
+		dir, err = ioutil.TempDir(tmpDir, "benchsort_test")
+		if err != nil {
+			log.Fatal(err)
+		}
+		fs, err = fsBuilder.SetSC(sc).SetSchema(keySize, valSize).SetBuf(bufSize).SetDesc(byDesc).SetDir(dir).Build()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		cLog("Inputing...")
+		start = time.Now()
+		for _, r := range data {
+			err = fs.Input(r.key, r.val, r.handle)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		cLog("Done!")
+		cLogf("Input %d rows", len(data))
+		cLog("Time used: ", time.Since(start))
+		cLog("=================================")
+
+		cLog("Outputing...")
+		totalRows := int(float64(len(data)) * (float64(outputRatio) / 100.0))
+		start = time.Now()
+		for i := 0; i < totalRows; i++ {
+			_, _, _, err = fs.Output()
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		cLog("Done!")
+		cLogf("Output %d rows", totalRows)
+		cLog("Time used: ", time.Since(start))
+		cLog("=================================")
+
+		cLog("Closing...")
+		start = time.Now()
+		err = fs.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+		cLog("Done!")
+		cLog("Time used: ", time.Since(start))
+		cLog("=================================")
 	}
 }
 
