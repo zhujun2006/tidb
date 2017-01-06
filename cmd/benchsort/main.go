@@ -49,25 +49,6 @@ var (
 	outputRatio int
 )
 
-func init() {
-	log.SetLevelByString(logLevel)
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	genCmd.StringVar(&tmpDir, "dir", cwd, "where to store the generated rows")
-	genCmd.IntVar(&keySize, "keySize", 8, "the size of key")
-	genCmd.IntVar(&valSize, "valSize", 8, "the size of vlaue")
-	genCmd.IntVar(&scale, "scale", 100, "how many rows to generate")
-
-	runCmd.StringVar(&tmpDir, "dir", cwd, "where to load the generated rows")
-	runCmd.IntVar(&bufSize, "bufSize", 500000, "how many rows held in memory at a time")
-	runCmd.IntVar(&inputRatio, "inputRatio", 100, "input percentage")
-	runCmd.IntVar(&outputRatio, "outputRatio", 100, "output percentage")
-}
-
 func nextRow(r *rand.Rand, keySize int, valSize int) *comparableRow {
 	key := make([]types.Datum, keySize)
 	for i := range key {
@@ -111,6 +92,85 @@ func encodeRow(b []byte, row *comparableRow) ([]byte, error) {
 	return b, nil
 }
 
+func decodeRow(fd *os.File) (*comparableRow, error) {
+	var (
+		err  error
+		n    int
+		head = make([]byte, 8)
+		dcod = make([]types.Datum, 0, keySize+valSize+1)
+	)
+
+	n, err = fd.Read(head)
+	if n != 8 {
+		return nil, errors.New("incorrect header")
+	}
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	rowSize := int(binary.BigEndian.Uint64(head))
+	rowBytes := make([]byte, rowSize)
+
+	n, err = fd.Read(rowBytes)
+	if n != rowSize {
+		return nil, errors.New("incorrect row")
+	}
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	dcod, err = codec.Decode(rowBytes, keySize+valSize+1)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	return &comparableRow{
+		key:    dcod[:keySize],
+		val:    dcod[keySize : keySize+valSize],
+		handle: dcod[keySize+valSize:][0].GetInt64(),
+	}, nil
+}
+
+func encodeMeta(b []byte, scale int, keySize int, valSize int) []byte {
+	meta := make([]byte, 8)
+
+	binary.BigEndian.PutUint64(meta, uint64(scale))
+	b = append(b, meta...)
+	binary.BigEndian.PutUint64(meta, uint64(keySize))
+	b = append(b, meta...)
+	binary.BigEndian.PutUint64(meta, uint64(valSize))
+	b = append(b, meta...)
+
+	return b
+}
+
+func decodeMeta(fd *os.File) error {
+	meta := make([]byte, 24)
+	if n, err := fd.Read(meta); err != nil || n != 24 {
+		if n != 24 {
+			return errors.New("incorrect meta data")
+		}
+		return errors.Trace(err)
+	}
+
+	scale = int(binary.BigEndian.Uint64(meta[:8]))
+	if scale <= 0 {
+		return errors.New("number of rows must be positive")
+	}
+
+	keySize = int(binary.BigEndian.Uint64(meta[8:16]))
+	if keySize <= 0 {
+		return errors.New("key size must be positive")
+	}
+
+	valSize = int(binary.BigEndian.Uint64(meta[16:]))
+	if valSize <= 0 {
+		return errors.New("value size must be positive")
+	}
+
+	return nil
+}
+
 func export() error {
 	var (
 		err         error
@@ -118,34 +178,14 @@ func export() error {
 		outputFile  *os.File
 	)
 
-	_, err = os.Stat(tmpDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return errors.New("tmpDir does not exist")
-		}
-		return errors.Trace(err)
-	}
-
 	fileName := path.Join(tmpDir, "data.out")
-	_, err = os.Stat(fileName)
-	if err == nil {
-		return errors.New("data file (data.out) exists")
-	}
-
 	outputFile, err = os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer outputFile.Close()
 
-	meta := make([]byte, 8)
-
-	binary.BigEndian.PutUint64(meta, uint64(scale))
-	outputBytes = append(outputBytes, meta...)
-	binary.BigEndian.PutUint64(meta, uint64(keySize))
-	outputBytes = append(outputBytes, meta...)
-	binary.BigEndian.PutUint64(meta, uint64(valSize))
-	outputBytes = append(outputBytes, meta...)
+	outputBytes = encodeMeta(outputBytes, scale, keySize, valSize)
 
 	seed := rand.NewSource(time.Now().UnixNano())
 	r := rand.New(seed)
@@ -157,112 +197,72 @@ func export() error {
 		}
 	}
 
-	if _, err := outputFile.Write(outputBytes); err != nil {
+	_, err = outputFile.Write(outputBytes)
+	if err != nil {
 		return errors.Trace(err)
 	}
+
 	return nil
 }
 
-func load() ([]*comparableRow, error) {
+func load(ratio int) ([]*comparableRow, error) {
 	var (
-		err  error
-		fd   *os.File
-		meta = make([]byte, 8)
+		err error
+		fd  *os.File
 	)
-
-	_, err = os.Stat(tmpDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, errors.New("tmpDir does not exist")
-		}
-		return nil, errors.Trace(err)
-	}
 
 	fileName := path.Join(tmpDir, "data.out")
 	fd, err = os.Open(fileName)
+	if os.IsNotExist(err) {
+		return nil, errors.New("data file (data.out) does not exist")
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, errors.New("data file (data.out) does not exist")
-		}
 		return nil, errors.Trace(err)
 	}
 	defer fd.Close()
 
-	if n, err := fd.Read(meta); err != nil || n != 8 {
-		if n != 8 {
-			return nil, errors.New("incorrect meta data")
-		}
+	err = decodeMeta(fd)
+	if err != nil {
 		return nil, errors.Trace(err)
-	}
-
-	scale = int(binary.BigEndian.Uint64(meta))
-	if scale <= 0 {
-		return nil, errors.New("number of rows should be positive")
-	}
-
-	if n, err := fd.Read(meta); err != nil || n != 8 {
-		if n != 8 {
-			return nil, errors.New("incorrect meta data")
-		}
-		return nil, errors.Trace(err)
-	}
-
-	keySize = int(binary.BigEndian.Uint64(meta))
-	if keySize <= 0 {
-		return nil, errors.New("key size should be positive")
-	}
-
-	if n, err := fd.Read(meta); err != nil || n != 8 {
-		if n != 8 {
-			return nil, errors.New("incorrect meta data")
-		}
-		return nil, errors.Trace(err)
-	}
-	valSize = int(binary.BigEndian.Uint64(meta))
-	if valSize <= 0 {
-		return nil, errors.New("value size should be positive")
 	}
 
 	cLogf("\tnumber of rows = %d, key size = %d, value size = %d", scale, keySize, valSize)
 
 	var (
-		head = make([]byte, 8)
-		dcod = make([]types.Datum, 0, keySize+valSize+1)
+		row  *comparableRow
 		data = make([]*comparableRow, 0, scale)
 	)
 
-	for i := 1; i <= scale; i++ {
-		if n, err := fd.Read(head); err != nil || n != 8 {
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			return nil, errors.New("incorrect header")
-		}
-
-		rowSize := int(binary.BigEndian.Uint64(head))
-		rowBytes := make([]byte, rowSize)
-
-		if n, err := fd.Read(rowBytes); err != nil || n != rowSize {
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			return nil, errors.New("incorrect row")
-		}
-
-		dcod, err = codec.Decode(rowBytes, keySize+valSize+1)
+	totalRows := scale * ratio / 100
+	cLogf("\tload %d rows", totalRows)
+	for i := 1; i <= totalRows; i++ {
+		row, err = decodeRow(fd)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-
-		var newRow = &comparableRow{
-			key:    dcod[:keySize],
-			val:    dcod[keySize : keySize+valSize],
-			handle: dcod[keySize+valSize:][0].GetInt64(),
-		}
-		data = append(data, newRow)
+		data = append(data, row)
 	}
 
 	return data, nil
+}
+
+func init() {
+	log.SetLevelByString(logLevel)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	genCmd.StringVar(&tmpDir, "dir", cwd, "where to store the generated rows")
+	genCmd.IntVar(&keySize, "keySize", 8, "the size of key")
+	genCmd.IntVar(&valSize, "valSize", 8, "the size of vlaue")
+	genCmd.IntVar(&scale, "scale", 100, "how many rows to generate")
+
+	runCmd.StringVar(&tmpDir, "dir", cwd, "where to load the generated rows")
+	runCmd.IntVar(&bufSize, "bufSize", 500000, "how many rows held in memory at a time")
+	runCmd.IntVar(&inputRatio, "inputRatio", 100, "input percentage")
+	runCmd.IntVar(&outputRatio, "outputRatio", 100, "output percentage")
 }
 
 func main() {
@@ -300,6 +300,12 @@ func main() {
 		if scale <= 0 {
 			log.Fatal(errors.New("scale must be positive"))
 		}
+		if _, err := os.Stat(tmpDir); err != nil {
+			if os.IsNotExist(err) {
+				log.Fatal(errors.New("tmpDir does not exist"))
+			}
+			log.Fatal(err)
+		}
 
 		cLog("Generating...")
 		start := time.Now()
@@ -313,18 +319,35 @@ func main() {
 
 	if runCmd.Parsed() {
 		// Sanity checks
+		if bufSize <= 0 {
+			log.Fatal(errors.New("buffer size must be positive"))
+		}
+		if inputRatio < 0 || inputRatio > 100 {
+			log.Fatal(errors.New("input ratio must between 0 and 100 (inclusive)"))
+		}
+		if outputRatio < 0 || outputRatio > 100 {
+			log.Fatal(errors.New("output ratio must between 0 and 100 (inclusive)"))
+		}
+		if _, err := os.Stat(tmpDir); err != nil {
+			if os.IsNotExist(err) {
+				log.Fatal(errors.New("tmpDir does not exist"))
+			}
+			log.Fatal(err)
+		}
 
 		var (
-			err error
-			// data []*comparableRow
+			err  error
+			data []*comparableRow
 		)
 		cLog("Loading...")
 		start := time.Now()
-		if _, err = load(); err != nil {
+		data, err = load(inputRatio)
+		if err != nil {
 			log.Fatal(err)
 		}
 		cLog("Done!")
 		cLog("Time used: ", time.Since(start))
+		cLogf("data size: %d", len(data))
 	}
 }
 
