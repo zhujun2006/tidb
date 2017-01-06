@@ -234,7 +234,7 @@ func load(ratio int) ([]*comparableRow, error) {
 		data = make([]*comparableRow, 0, scale)
 	)
 
-	totalRows := scale * ratio / 100
+	totalRows := int(float64(scale) * (float64(ratio) / 100.0))
 	cLogf("\tload %d rows", totalRows)
 	for i := 1; i <= totalRows; i++ {
 		row, err = decodeRow(fd)
