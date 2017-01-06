@@ -61,6 +61,7 @@ func nextRow(r *rand.Rand, keySize int, valSize int) *comparableRow {
 	}
 
 	handle := r.Int63()
+	// cLogf("key: %d, val: %d, handle: %d", key[0].GetInt64(), val[0].GetInt64(), handle)
 	return &comparableRow{key: key, val: val, handle: handle}
 }
 
@@ -240,6 +241,8 @@ func load(ratio int) ([]*comparableRow, error) {
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
+		// cLogf("key: %d, val: %d, handle: %d",
+		// row.key[0].GetInt64(), row.val[0].GetInt64(), row.handle)
 		data = append(data, row)
 	}
 
