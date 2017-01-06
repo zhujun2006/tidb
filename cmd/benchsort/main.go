@@ -21,6 +21,7 @@ import (
 	"math/rand"
 	"os"
 	"path"
+	"runtime/pprof"
 	"time"
 
 	"github.com/juju/errors"
@@ -43,6 +44,7 @@ var (
 	// helpCmd = flag.NewFlagSet("help", flag.ExitOnError)
 
 	logLevel    = "warn"
+	cpuprofile  string
 	tmpDir      string
 	keySize     int
 	valSize     int
@@ -264,11 +266,13 @@ func init() {
 	genCmd.IntVar(&keySize, "keySize", 8, "the size of key")
 	genCmd.IntVar(&valSize, "valSize", 8, "the size of vlaue")
 	genCmd.IntVar(&scale, "scale", 100, "how many rows to generate")
+	genCmd.StringVar(&cpuprofile, "cpuprofile", "", "write cpu profile to file")
 
 	runCmd.StringVar(&tmpDir, "dir", cwd, "where to load the generated rows")
 	runCmd.IntVar(&bufSize, "bufSize", 500000, "how many rows held in memory at a time")
 	runCmd.IntVar(&inputRatio, "inputRatio", 100, "input percentage")
 	runCmd.IntVar(&outputRatio, "outputRatio", 100, "output percentage")
+	runCmd.StringVar(&cpuprofile, "cpuprofile", "", "write cpu profile to file")
 }
 
 func main() {
@@ -343,10 +347,11 @@ func main() {
 		}
 
 		var (
-			err  error
-			dir  string
-			data []*comparableRow
-			fs   *filesort.FileSorter
+			err     error
+			dir     string
+			data    []*comparableRow
+			profile *os.File
+			fs      *filesort.FileSorter
 		)
 		cLog("Loading...")
 		start := time.Now()
@@ -374,6 +379,13 @@ func main() {
 			log.Fatal(err)
 		}
 
+		if cpuprofile != "" {
+			profile, err = os.Create(cpuprofile)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+
 		cLog("Inputing...")
 		start = time.Now()
 		for _, r := range data {
@@ -390,11 +402,17 @@ func main() {
 		cLog("Outputing...")
 		totalRows := int(float64(len(data)) * (float64(outputRatio) / 100.0))
 		start = time.Now()
+		if cpuprofile != "" {
+			pprof.StartCPUProfile(profile)
+		}
 		for i := 0; i < totalRows; i++ {
 			_, _, _, err = fs.Output()
 			if err != nil {
 				log.Fatal(err)
 			}
+		}
+		if cpuprofile != "" {
+			pprof.StopCPUProfile()
 		}
 		cLog("Done!")
 		cLogf("Output %d rows", totalRows)
