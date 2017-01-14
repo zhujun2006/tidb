@@ -40,7 +40,7 @@ type comparableRow struct {
 
 var (
 	genCmd = flag.NewFlagSet("gen", flag.ExitOnError)
-	runCmd = flag.NewFlagSet("gen", flag.ExitOnError)
+	runCmd = flag.NewFlagSet("cmd", flag.ExitOnError)
 	// helpCmd = flag.NewFlagSet("help", flag.ExitOnError)
 
 	logLevel    = "warn"
