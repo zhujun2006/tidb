@@ -235,6 +235,8 @@ func (fs *FileSorter) flushToFile() error {
 		err        error
 		outputFile *os.File
 		outputByte []byte
+		head       = make([]byte, 8)
+		prevLen    int
 	)
 
 	sort.Sort(fs)
@@ -251,26 +253,25 @@ func (fs *FileSorter) flushToFile() error {
 	defer outputFile.Close()
 
 	for _, row := range fs.buf {
-		var body []byte
-		var head = make([]byte, 8)
-
-		body, err = codec.EncodeKey(body, row.key...)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		body, err = codec.EncodeKey(body, row.val...)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		body, err = codec.EncodeKey(body, types.NewIntDatum(row.handle))
-		if err != nil {
-			return errors.Trace(err)
-		}
-
-		binary.BigEndian.PutUint64(head, uint64(len(body)))
-
+		prevLen = len(outputByte)
 		outputByte = append(outputByte, head...)
-		outputByte = append(outputByte, body...)
+		outputByte, err = codec.EncodeKey(outputByte, row.key...)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		outputByte, err = codec.EncodeKey(outputByte, row.val...)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		outputByte, err = codec.EncodeKey(outputByte, types.NewIntDatum(row.handle))
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		binary.BigEndian.PutUint64(head, uint64(len(outputByte)-prevLen-8))
+		for i := 0; i < 8; i++ {
+			outputByte[prevLen+i] = head[i]
+		}
 	}
 
 	_, err = outputFile.Write(outputByte)
