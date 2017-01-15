@@ -119,6 +119,10 @@ type FileSorter struct {
 	fds       []*os.File
 	fileCount int
 	err       error
+	head      []byte
+	dcod      []types.Datum
+	rowBytes  []byte
+	maxRowLen int
 }
 
 // Builder builds a new FileSorter.
@@ -194,15 +198,18 @@ func (b *Builder) Build() (*FileSorter, error) {
 	}
 
 	return &FileSorter{sc: b.sc,
-		keySize: b.keySize,
-		valSize: b.valSize,
-		bufSize: b.bufSize,
-		buf:     make([]*comparableRow, 0, b.bufSize),
-		files:   make([]string, 0),
-		byDesc:  b.byDesc,
-		rowHeap: rh,
-		tmpDir:  b.tmpDir,
-		fds:     make([]*os.File, 0),
+		keySize:   b.keySize,
+		valSize:   b.valSize,
+		bufSize:   b.bufSize,
+		buf:       make([]*comparableRow, 0, b.bufSize),
+		files:     make([]string, 0),
+		byDesc:    b.byDesc,
+		rowHeap:   rh,
+		tmpDir:    b.tmpDir,
+		fds:       make([]*os.File, 0),
+		head:      make([]byte, 8),
+		dcod:      make([]types.Datum, 0, b.keySize+b.valSize+1),
+		maxRowLen: b.keySize + b.valSize + 1,
 	}, nil
 }
 
@@ -235,7 +242,6 @@ func (fs *FileSorter) flushToFile() error {
 		err        error
 		outputFile *os.File
 		outputByte []byte
-		head       = make([]byte, 8)
 		prevLen    int
 	)
 
@@ -254,7 +260,7 @@ func (fs *FileSorter) flushToFile() error {
 
 	for _, row := range fs.buf {
 		prevLen = len(outputByte)
-		outputByte = append(outputByte, head...)
+		outputByte = append(outputByte, fs.head...)
 		outputByte, err = codec.EncodeKey(outputByte, row.key...)
 		if err != nil {
 			return errors.Trace(err)
@@ -268,9 +274,12 @@ func (fs *FileSorter) flushToFile() error {
 			return errors.Trace(err)
 		}
 
-		binary.BigEndian.PutUint64(head, uint64(len(outputByte)-prevLen-8))
+		if len(outputByte)-prevLen-8 > fs.maxRowLen {
+			fs.maxRowLen = len(outputByte) - prevLen - 8
+		}
+		binary.BigEndian.PutUint64(fs.head, uint64(len(outputByte)-prevLen-8))
 		for i := 0; i < 8; i++ {
-			outputByte[prevLen+i] = head[i]
+			outputByte[prevLen+i] = fs.head[i]
 		}
 	}
 
@@ -321,12 +330,10 @@ func (fs *FileSorter) Input(key []types.Datum, val []types.Datum, handle int64) 
 // Fetch the next row given the source file index.
 func (fs *FileSorter) fetchNextRow(index int) (*comparableRow, error) {
 	var (
-		err  error
-		n    int
-		head = make([]byte, 8)
-		dcod = make([]types.Datum, 0, fs.keySize+fs.valSize+1)
+		err error
+		n   int
 	)
-	n, err = fs.fds[index].Read(head)
+	n, err = fs.fds[index].Read(fs.head)
 	if err == io.EOF {
 		return nil, nil
 	}
@@ -336,11 +343,9 @@ func (fs *FileSorter) fetchNextRow(index int) (*comparableRow, error) {
 	if n != 8 {
 		return nil, errors.New("incorrect header")
 	}
-	rowSize := int(binary.BigEndian.Uint64(head))
+	rowSize := int(binary.BigEndian.Uint64(fs.head))
 
-	rowBytes := make([]byte, rowSize)
-
-	n, err = fs.fds[index].Read(rowBytes)
+	n, err = fs.fds[index].Read(fs.rowBytes)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -348,15 +353,15 @@ func (fs *FileSorter) fetchNextRow(index int) (*comparableRow, error) {
 		return nil, errors.New("incorrect row")
 	}
 
-	dcod, err = codec.Decode(rowBytes, fs.keySize+fs.valSize+1)
+	fs.dcod, err = codec.Decode(fs.rowBytes, fs.keySize+fs.valSize+1)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	return &comparableRow{
-		key:    dcod[:fs.keySize],
-		val:    dcod[fs.keySize : fs.keySize+fs.valSize],
-		handle: dcod[fs.keySize+fs.valSize:][0].GetInt64(),
+		key:    fs.dcod[:fs.keySize],
+		val:    fs.dcod[fs.keySize : fs.keySize+fs.valSize],
+		handle: fs.dcod[fs.keySize+fs.valSize:][0].GetInt64(),
 	}, nil
 }
 
@@ -457,6 +462,8 @@ func (fs *FileSorter) externalSort() (*comparableRow, error) {
 		if fs.rowHeap.err != nil {
 			return nil, errors.Trace(fs.rowHeap.err)
 		}
+
+		fs.rowBytes = make([]byte, fs.maxRowLen)
 
 		err := fs.openAllFiles()
 		if err != nil {
