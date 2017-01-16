@@ -30,7 +30,7 @@ const (
 	// The limit of single entry size (len(key) + len(value)).
 	EntrySizeLimit = 6 * 1024 * 1024
 	// The limit of number of entries in the MemBuffer.
-	BufferLenLimit = 100 * 1000
+	BufferLenLimit = 1000 * 1000
 	// The limit of the sum of all entry size.
 	BufferSizeLimit = 100 * 1024 * 1024
 )
