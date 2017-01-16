@@ -740,10 +740,11 @@ func runInBootstrapSession(store kv.Storage, bootstrap func(Session)) {
 
 func createSession(store kv.Storage) (*session, error) {
 	s := &session{
-		values:      make(map[fmt.Stringer]interface{}),
-		store:       store,
-		parser:      parser.New(),
-		sessionVars: variable.NewSessionVars(),
+		values:              make(map[fmt.Stringer]interface{}),
+		store:               store,
+		parser:              parser.New(),
+		sessionVars:         variable.NewSessionVars(),
+		unlimitedRetryCount: true,
 	}
 	domain, err := domap.Get(store)
 	if err != nil {
